@@ -1,0 +1,15 @@
+﻿
+jobs:
+  - directories:
+    - "c:\test data"
+    priority: 1
+    storage-account: jaysbackup
+    archive:
+      container: data-archive
+      # directory: 
+    delta:
+      container: data-delta
+
+    history:
+      container: data-history
+
