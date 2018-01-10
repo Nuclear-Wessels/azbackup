@@ -1,0 +1,33 @@
+
+syntax = "proto3";
+package azbackup;
+
+
+message FileInfo
+{
+    string filename = 1;
+    int64 lastWriteUTCTicks = 2;
+
+    enum StorageTier 
+    {
+        Archive = 0;
+        Delta = 1;
+    }
+
+    StorageTier storageTier = 3;
+}
+
+
+message DirInfo
+{
+    string directory = 1;
+    repeated FileInfo fileInfos = 2;
+}
+
+
+message CacheBlock
+{
+    DirInfo dirInfo = 1;
+}
+
+

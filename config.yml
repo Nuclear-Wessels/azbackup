@@ -10,6 +10,7 @@ jobs:
       destination: 'pictures'
       exclude-regex:
       - '.*\\thumbs.db'
+      attr-exclude: S
     priority: 1
     # type: archive
     storage-account: jaysbackup

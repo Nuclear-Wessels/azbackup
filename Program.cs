@@ -8,10 +8,14 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Azbackup;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
+
+using Google.Protobuf;
+
 
 namespace azbackup
 {
@@ -19,6 +23,9 @@ namespace azbackup
     {
         public string Source { get; set; }
         public string Destination { get; set; }
+
+        [YamlMember(Alias = "attr-exclude", ApplyNamingConventions = false)]
+        public string AttributeExclude { get; set; }
     }
 
     public class ContainerConfig
@@ -42,6 +49,10 @@ namespace azbackup
 
         [YamlMember(Alias = "auth-key-file", ApplyNamingConventions = false)]
         public string AuthKeyFile { get; set; }
+
+        [YamlMember(Alias = "metadata-cache-file", ApplyNamingConventions = false)]
+        public string MetadataCacheFile { get; set; }
+
     }
 
 
@@ -77,7 +88,8 @@ namespace azbackup
         private CloudBlobContainer historyContainer;
 
 
-        private Dictionary<string, long> fileData = new Dictionary<string, long>();
+        private Dictionary<string, long> archiveFileData = new Dictionary<string, long>();
+        private Dictionary<string, long> deltaFileData = new Dictionary<string, long>();
 
 
         private static string GetConnectionString(string accountName, string accountKey)
@@ -86,22 +98,7 @@ namespace azbackup
         }
 
 
-        public static bool CompareDateTimes(DateTime dt1, DateTime dt2)
-        {
-            bool ok = true;
-
-            ok &= dt1.Year == dt2.Year;
-            ok &= dt1.Month == dt2.Month;
-            ok &= dt1.Day == dt2.Day;
-            ok &= dt1.Hour == dt2.Hour;
-            ok &= dt1.Minute == dt2.Minute;
-            ok &= dt1.Second == dt2.Second;
-            ok &= dt1.Millisecond == dt2.Millisecond;
-
-            return ok;
-        }
-
-        public void UploadDirectory(string rootDir, string currentDir, string destDir)
+        public void UploadDirectory(Job job, string rootDir, string currentDir, string destDir)
         {
             DirectoryInfo dirInfo = new DirectoryInfo(currentDir);
 
@@ -130,6 +127,9 @@ namespace azbackup
                 historyBlobItems = historyContainer.ListBlobs(currentDestDir).OfType<CloudBlockBlob>().Select(a => a as CloudBlockBlob);
             }
 
+            CacheBlock cacheBlock = new CacheBlock();
+            cacheBlock.DirInfo = new DirInfo() { Directory = currentDir };
+
             var fileInfos = dirInfo.EnumerateFiles();
             foreach (var fileInfo in fileInfos)
             {
@@ -141,84 +141,155 @@ namespace azbackup
                     continue;
                 }
                     
-
                 string destBlobName = destDir + fileInfo.FullName.Substring(rootDir.Length).Replace('\\', '/');
 
-                // check to see if there's an archive file
-                var archiveBlobItem = archiveBlobItems.SingleOrDefault(a => a.Name == destBlobName);
-                if (archiveBlobItem != null)
+                bool storeArchive = false;
+                bool storeDelta = false;
+                bool copyHistory = false;
+
+                if (archiveFileData.ContainsKey(fileInfo.FullName))
                 {
-                    archiveBlobItem.FetchAttributes();
-
-                    DateTime lastWriteUTC = DateTime.ParseExact(archiveBlobItem.Metadata["LastWriteTimeUTC"], "yyyy-MM-dd-HH-mm-ss.fff", CultureInfo.InvariantCulture);
-                    lastWriteUTC = DateTime.SpecifyKind(lastWriteUTC, DateTimeKind.Utc);
-
-                    long lastWriteUTCTicks = long.Parse(archiveBlobItem.Metadata["LastWriteTimeUTCTicks"]);
-
-                    if (lastWriteUTCTicks != fileInfo.LastWriteTimeUtc.Ticks)
+                    if (archiveFileData[fileInfo.FullName] != fileInfo.LastWriteTimeUtc.Ticks)
                     {
-                        // Archive container can't modify content, so we'll check the Delta blob
-                        var deltaBlobItem = deltaBlobItems.SingleOrDefault(a => a.Name == destBlobName);
-                        if (deltaBlobItem == null)
+                        if (deltaFileData.ContainsKey(fileInfo.FullName))
                         {
-                            // there is no delta blob, so we'll upload it
-
-                            UploadFile(fileInfo.FullName, deltaContainer, destBlobName);
+                            if (deltaFileData[fileInfo.FullName] != fileInfo.LastAccessTimeUtc.Ticks)
+                            {
+                                storeDelta = copyHistory = true;
+                            }
                         }
                         else
                         {
-                            // there is a blob, so we'll copy it to the history folder
-                            string historyBlobName = destBlobName + '.' + DateTime.UtcNow.ToString("yyyyMMddHHmmss");
-                            CloudBlockBlob historyItem = historyContainer.GetBlockBlobReference(historyBlobName);
-                            historyItem.StartCopy(deltaBlobItem);
-
-                            Console.WriteLine("\tCopying {0} to {1}...", deltaBlobItem.Name, historyBlobName);
-
-                            bool done = false;
-                            while (!done)
-                            {
-                                switch (historyItem.CopyState.Status)
-                                {
-                                case CopyStatus.Success:
-                                    done = true;
-                                    break;
-
-                                case CopyStatus.Pending:
-                                    Thread.Sleep(100);
-                                    break;
-
-                                case CopyStatus.Aborted:
-                                    done = true;
-                                    break;
-
-                                case CopyStatus.Invalid:
-                                    done = true;
-                                    break;
-
-                                case CopyStatus.Failed:
-                                    done = true;
-                                    break;
-                                }
-                            }
-
-                            // now upload the new file to the delta container
-                            Console.WriteLine("\tUploading {0} to delta storage...", fileInfo.Name);
-                            UploadFile(fileInfo.FullName, deltaContainer, destBlobName);
+                            storeDelta = true;
                         }
                     }
-
                 }
                 else
                 {
+                    var archiveBlobItem = archiveBlobItems.SingleOrDefault(a => a.Name == destBlobName);
+
+                    if (archiveBlobItem == null)
+                    {
+                        storeArchive = true;
+                    }
+                    else
+                    {
+                        archiveBlobItem.FetchAttributes();
+                        long lastWriteUTCTicks = long.Parse(archiveBlobItem.Metadata["LastWriteTimeUTCTicks"]);
+
+                        if (lastWriteUTCTicks != fileInfo.LastWriteTimeUtc.Ticks)
+                        {
+                            // Archive container can't modify content, so we'll check the Delta blob
+                            var deltaBlobItem = deltaBlobItems.SingleOrDefault(a => a.Name == destBlobName);
+                            if (deltaBlobItem == null)
+                            {
+                                storeDelta = true;
+                            }
+                            else
+                            {
+                                storeDelta = true;
+                                copyHistory = true;
+                            }
+                        }
+                        else
+                        {
+                            Azbackup.FileInfo azFileInfo = new Azbackup.FileInfo()
+                            {
+                                Filename = fileInfo.Name,
+                                StorageTier = Azbackup.FileInfo.Types.StorageTier.Archive,
+                                LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
+                            };
+
+                            cacheBlock.DirInfo.FileInfos.Add(azFileInfo);
+                        }
+
+                    }
+                }
+
+                if (storeArchive)
+                {
                     Console.WriteLine("\tUploading {0} to archive storage...", fileInfo.Name);
                     UploadFile(fileInfo.FullName, archiveContainer, destBlobName, true);
+
+                    Azbackup.FileInfo azFileInfo = new Azbackup.FileInfo()
+                    {
+                        Filename = fileInfo.Name,
+                        StorageTier = Azbackup.FileInfo.Types.StorageTier.Archive,
+                        LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
+                    };
+
+                    cacheBlock.DirInfo.FileInfos.Add(azFileInfo);
+                }
+
+                if (copyHistory)
+                {
+                    string historyBlobName = destBlobName + '.' + DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                    CloudBlockBlob historyItem = historyContainer.GetBlockBlobReference(historyBlobName);
+                    var deltaBlobItem = deltaBlobItems.SingleOrDefault(a => a.Name == destBlobName);
+                    historyItem.StartCopy(deltaBlobItem);
+
+                    Console.WriteLine("\tCopying {0} to {1}...", deltaBlobItem.Name, historyBlobName);
+
+                    bool done = false;
+                    while (!done)
+                    {
+                        switch (historyItem.CopyState.Status)
+                        {
+                        case CopyStatus.Success:
+                            done = true;
+                            break;
+
+                        case CopyStatus.Pending:
+                            Thread.Sleep(100);
+                            break;
+                                        
+                        case CopyStatus.Aborted:
+                            done = true;
+                            break;
+
+                        case CopyStatus.Invalid:
+                            done = true;
+                            break;
+
+                        case CopyStatus.Failed:
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (storeDelta)
+                {
+                    Console.WriteLine("\tUploading {0} to delta storage...", fileInfo.Name);
+                    UploadFile(fileInfo.FullName, deltaContainer, destBlobName);
+
+                    Azbackup.FileInfo azFileInfo = new Azbackup.FileInfo()
+                    {
+                        Filename = fileInfo.Name,
+                        StorageTier = Azbackup.FileInfo.Types.StorageTier.Delta,
+                        LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
+                    };
+
+                    cacheBlock.DirInfo.FileInfos.Add(azFileInfo);
                 }
             }
+
+
+            if (job.MetadataCacheFile != null && cacheBlock.DirInfo.FileInfos.Count > 0)
+            {
+                Console.WriteLine("Writing {0} files to {1} cache...", cacheBlock.DirInfo.FileInfos.Count, job.MetadataCacheFile);
+                using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.Append, FileAccess.Write, FileShare.Read))
+                {
+                    cacheBlock.WriteDelimitedTo(fs);
+                }
+            }
+
+            cacheBlock = null;
 
             var dirInfos = dirInfo.GetDirectories();
             foreach (var di2 in dirInfos)
             {
-                UploadDirectory(rootDir, di2.FullName, destDir);
+                UploadDirectory(job, rootDir, di2.FullName, destDir);
             }
 
         }
@@ -227,7 +298,7 @@ namespace azbackup
 
         public void UploadFile(string srcFilenameFullPath, CloudBlobContainer container, string destFilename, bool setArchiveFlag = false)
         {
-            FileInfo fileInfo = new FileInfo(srcFilenameFullPath);
+            System.IO.FileInfo fileInfo = new System.IO.FileInfo(srcFilenameFullPath);
 
             Uri uri = new Uri(container.Uri.AbsoluteUri + '/' + destFilename);
              
@@ -272,7 +343,7 @@ namespace azbackup
 
                     for (int i=lastCommittedBlock+1; i < totalBlocks; i++)
                     {
-                        Console.WriteLine("\tSending block {0} of {1}", i, totalBlocks);
+                        Console.Write("\tSending block {0} of {1}\r", i, totalBlocks);
 
                         fs.Seek((long)i * BlockSize, SeekOrigin.Begin);
                         int bytesRead = fs.Read(buffer, 0, (int) BlockSize);
@@ -301,6 +372,8 @@ namespace azbackup
                             }
                         }
                     }
+
+                    Console.WriteLine();
                 }
 
                 List<string> blockNamesList = new List<string>();
@@ -366,7 +439,40 @@ namespace azbackup
             historyContainer.CreateIfNotExists();
 
             
-            if ()
+            if (job.MetadataCacheFile != null)
+            {
+                // open the metadata file
+                using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.OpenOrCreate, FileAccess.Read, FileShare.Read))
+                {
+                    try
+                    {
+                        while (true)
+                        {
+                            CacheBlock cacheBlock = CacheBlock.Parser.ParseDelimitedFrom(fs);
+
+                            foreach (var fileInfo in cacheBlock.DirInfo.FileInfos)
+                            {
+                                string path = Path.Combine(cacheBlock.DirInfo.Directory, fileInfo.Filename);
+
+                                switch (fileInfo.StorageTier)
+                                {
+                                case Azbackup.FileInfo.Types.StorageTier.Archive:
+                                    archiveFileData[path] = fileInfo.LastWriteUTCTicks;
+                                    break;
+
+                                case Azbackup.FileInfo.Types.StorageTier.Delta:
+                                    deltaFileData[path] = fileInfo.LastWriteUTCTicks;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch (InvalidProtocolBufferException)
+                    {
+                        // we're done, so bail out
+                    }
+                }
+            }
             
 
             foreach (var dirJob in job.Directories)
@@ -377,7 +483,7 @@ namespace azbackup
                 if (!destDir.EndsWith("/"))
                     destDir += '/';
 
-                UploadDirectory(di.FullName, di.FullName, destDir);
+                UploadDirectory(job, di.FullName, di.FullName, destDir);
             }
         }
 
@@ -420,59 +526,6 @@ namespace azbackup
         }
 
 
-        //static void Main(string[] args)
-        //{
-        //    //System.Net.ServicePointManager.DefaultConnectionLimit = 35;
-
-        //    cloudAccount = CloudStorageAccount.Parse("DefaultEndpointsProtocol=http;AccountName=" + ACCOUNTNAME + ";AccountKey=" + ACCOUNTKEY);
-        //    if (cloudAccount != null)
-        //    {
-        //        cloudBlobClient = cloudAccount.CreateCloudBlobClient();
-        //        cloudBlobContainer = cloudBlobClient.GetContainerReference(CONTAINER);
-        //        cloudBlobContainer.CreateIfNotExist();
-        //    }
-
-        //    // Upload the file
-        //    CloudBlockBlob blockBlob = cloudBlobContainer.GetBlockBlobReference(CONTAINER + "/" + System.IO.Path.GetFileName(LOCALFILE));
-
-        //    blobUpload.BeginUploadFromStream();
-            
-
-        //    BlobTransfer transferUpload = new BlobTransfer();
-        //    transferUpload.TransferProgressChanged += new EventHandler<BlobTransfer.BlobTransferProgressChangedEventArgs>(transfer_TransferProgressChanged);
-        //    transferUpload.TransferCompleted += new System.ComponentModel.AsyncCompletedEventHandler(transfer_TransferCompleted);
-        //    transferUpload.UploadBlobAsync(blockBlob, LOCALFILE);
-
-        //    Transferring = true;
-        //    while (Transferring)
-        //    {
-        //        Console.ReadLine();
-        //    }
-
-        //    // Download the file
-        //    //CloudBlob blobDownload = ContainerFileTransfer.GetBlobReference(CONTAINER + "/" + System.IO.Path.GetFileName(LOCALFILE));
-        //    //BlobTransfer transferDownload = new BlobTransfer();
-        //    //transferDownload.TransferProgressChanged += new EventHandler<BlobTransfer.BlobTransferProgressChangedEventArgs>(transfer_TransferProgressChanged);
-        //    //transferDownload.TransferCompleted += new System.ComponentModel.AsyncCompletedEventHandler(transfer_TransferCompleted);
-        //    //transferDownload.DownloadBlobAsync(blobDownload, LOCALFILE + ".copy");
-
-        //    //Transferring = true;
-        //    //while (Transferring)
-        //    //{
-        //    //    Console.ReadLine();
-        //    //}
-        //}
-
-        //static void transfer_TransferCompleted(object sender, System.ComponentModel.AsyncCompletedEventArgs e)
-        //{
-        //    Transferring = false;
-        //    Console.WriteLine("Transfer completed. Press any key to continue.");
-        //}
-
-        //static void transfer_TransferProgressChanged(object sender, BlobTransfer.BlobTransferProgressChangedEventArgs e)
-        //{
-        //    Console.WriteLine("Transfer progress percentage = " + e.ProgressPercentage + " - " + (e.Speed / 1024).ToString("N2") + "KB/s");
-        //}
     }
 
 }
