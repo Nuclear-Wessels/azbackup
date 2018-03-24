@@ -79,16 +79,23 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Azbackup.cs" />
+    <Compile Include="..\Azbackup.cs">
+      <Link>Azbackup.cs</Link>
+    </Compile>
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="App.config" />
-    <None Include="authkey.yml" />
-    <None Include="config.yml">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    <None Include="..\..\authkey.yml">
+      <Link>authkey.yml</Link>
     </None>
+    <None Include="..\..\config.yml">
+      <Link>config.yml</Link>
+    </None>
+    <None Include="..\..\config_test.yml">
+      <Link>config_test.yml</Link>
+    </None>
+    <None Include="App.config" />
     <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
