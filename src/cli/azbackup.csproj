@@ -82,6 +82,9 @@
     <Compile Include="..\Azbackup.cs">
       <Link>Azbackup.cs</Link>
     </Compile>
+    <Compile Include="..\AzbackupProto.pb.cs">
+      <Link>AzbackupProto.pb.cs</Link>
+    </Compile>
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

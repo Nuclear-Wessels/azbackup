@@ -2,16 +2,16 @@
 performance:
   # upload-rate: 5000
   schedule:
-  - Days:
-    - Sunday
-    - Monday
-    - Tuesday
-    - Wednesday
-    - Thursday
-    - Friday
-    - Saturday
-    Start: 0000
-    Duration: 60
+  - days:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    start: 0
+    duration: 60
 
 jobs:
   - name: archive_job
