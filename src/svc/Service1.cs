@@ -72,7 +72,6 @@ namespace Azbackup
 
             while (!stopFlag.WaitOne(0))
             {
-                
                 if (!yamlConfig.Performance.IsActive)
                 {
                     // hang around until there's something to do
@@ -114,5 +113,14 @@ namespace Azbackup
 
             doneFlag.WaitOne();
         }
+
+
+#if DEBUG
+        public void Start(string[] args)
+        {
+            OnStart(args);
+        }
+#endif
+
     }
 }

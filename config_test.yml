@@ -11,7 +11,7 @@ performance:
     - 5
     - 6
     start: 0
-    duration: 60
+    duration: 1440
 
 jobs:
   - name: archive_job
@@ -19,7 +19,7 @@ jobs:
     - source: 'y:\' 
       destination: 'pictures'
       include-regex:
-      - 'C:\\Users\\.*\\Documents'
+      - 'C:\\Users\\jwess\\Documents'
       exclude-regex:
       - '.*\\thumbs.db'
       attr-exclude:
@@ -28,7 +28,7 @@ jobs:
     # type: archive
     storage-account: jaysbackup
     # auth-key: 
-    auth-key-file: "..\\..\\authkey.yml"
+    auth-key-file: "..\\..\\..\\..\\authkey.yml"
     metadata-cache-file: metadata.cache.bin
     archive:
       container: data-archive
@@ -38,21 +38,21 @@ jobs:
       container: data-history
   - name: test_job
     directories:
-    - source: 'c:\Users\' 
+    - source: 'c:\Users\jwess' 
       destination: 'docs'
       include-regex:
-      - 'C:\\Users\\.*\\Documents'
-      - 'C:\\Users\\.*\\Pictures'
-      - 'C:\\Users\\.*\\Music'
-      #exclude-regex:
-      #- '.*\\thumbs.db'
+      - 'C:\\Users\\jwess\\Documents\\.*'
+      - 'C:\\Users\\jwess\\Pictures\\.*'
+      - 'C:\\Users\\jwess\\Music\\.*'
+      exclude-regex:
+      - '.*\\thumbs.db'
       attr-exclude:
       - System
     priority: 1
     # type: archive
     storage-account: jaysbackup
     # auth-key: 
-    auth-key-file: "..\\..\\authkey.yml"
+    auth-key-file: "..\\..\\..\\..\\authkey.yml"
     metadata-cache-file: metadata.cache.bin
     archive:
       container: test-archive

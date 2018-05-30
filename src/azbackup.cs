@@ -16,7 +16,7 @@ using YamlDotNet.Serialization.NamingConventions;
 using Google.Protobuf;
 using Azbackup.Proto;
 using azpb = Azbackup.Proto;
-
+using System.Text.RegularExpressions;
 
 namespace Azbackup
 {
@@ -26,7 +26,16 @@ namespace Azbackup
         public string Destination { get; set; }
 
         [YamlMember(Alias = "attr-exclude", ApplyNamingConventions = false)]
-        public string AttributeExclude { get; set; }
+        public string[] AttributeExclude { get; set; }
+
+        [YamlMember(Alias = "attr-include", ApplyNamingConventions = false)]
+        public string[] AttributeInclude { get; set;  }
+
+        [YamlMember(Alias = "include-regex", ApplyNamingConventions = false)]
+        public string[] IncludeRegex { get; set; }
+
+        [YamlMember(Alias = "exclude-regex", ApplyNamingConventions = false)]
+        public string[] ExcludeRegex { get; set; }
     }
 
     public class ContainerConfig
@@ -137,6 +146,7 @@ namespace Azbackup
     public class AzureBackup
     {
         public YAMLConfig YAMLConfig { get; set; }
+        
 
         private ManualResetEvent stopFlag = new ManualResetEvent(false);
 
@@ -194,16 +204,74 @@ namespace Azbackup
             cacheBlock.DirInfo = new DirInfo() { Directory = currentDir };
 
             var fileInfos = dirInfo.EnumerateFiles();
+
+
+            DirectoryJob currentDirJob = job.Directories.Single(a => a.Source == rootDir);
+
+            //bool attrSystemInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "S", true) == 0) > 0;
+            //bool attrArchiveInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "A", true) == 0) > 0;
+            //bool attrHiddenInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "H", true) == 0) > 0;
+
+            bool attrSystemExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "S", true) == 0) > 0;
+            bool attrArchiveExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "A", true) == 0) > 0;
+            bool attrHiddenExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "H", true) == 0) > 0;
+
             foreach (var fileInfo in fileInfos)
             {
                 Console.WriteLine("Processing file {0}", fileInfo.Name);
 
-                if (fileInfo.Attributes.HasFlag(FileAttributes.System))
+                bool includeFile = true;
+                if (currentDirJob.IncludeRegex != null)
                 {
-                    Console.WriteLine("\tSkipping due to System file attribute...");
+                    includeFile = false;
+
+                    foreach (string s in currentDirJob.IncludeRegex)
+                    {
+                        Regex regex = new Regex(s);
+                        if (regex.IsMatch(fileInfo.FullName))
+                        {
+                            includeFile = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (currentDirJob.ExcludeRegex != null)
+                {
+                    foreach (string s in currentDirJob.ExcludeRegex)
+                    {
+                        Regex regex = new Regex(s);
+                        if (regex.IsMatch(fileInfo.FullName))
+                        {
+                            includeFile = false;
+                        }
+                    }
+                }
+
+                bool attrInclude = true;
+
+                if (attrSystemExclude && fileInfo.Attributes.HasFlag(FileAttributes.System))
+                {
+                    attrInclude = false;
+                    //Console.WriteLine("\tSkipping due to System file attribute...");
+                    //continue;
+                }
+
+                if (attrHiddenExclude && fileInfo.Attributes.HasFlag(FileAttributes.Hidden))
+                {
+                    attrInclude = false;
+                }
+
+                if (attrArchiveExclude && fileInfo.Attributes.HasFlag(FileAttributes.Archive))
+                {
+                    attrInclude = false;
+                }
+
+                if (!(attrInclude && includeFile))
+                {
                     continue;
                 }
-                    
+
                 string destBlobName = destDir + fileInfo.FullName.Substring(rootDir.Length).Replace('\\', '/');
 
                 bool storeArchive = false;

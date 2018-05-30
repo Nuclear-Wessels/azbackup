@@ -12,14 +12,19 @@ namespace Azbackup
         /// <summary>
         /// The main entry point for the application.
         /// </summary>
-        public static void Main()
+        public static void Main(string[] args)
         {
+#if DEPLOY
             ServiceBase[] ServicesToRun;
             ServicesToRun = new ServiceBase[]
             {
-                new AzBackupSvc()
+            new AzBackupSvc()
             };
             ServiceBase.Run(ServicesToRun);
+#else 
+            AzBackupSvc svc = new AzBackupSvc();
+            svc.Start(args);
+#endif
+            }
         }
-    }
 }
