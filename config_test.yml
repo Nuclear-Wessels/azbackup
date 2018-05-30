@@ -1,0 +1,65 @@
+﻿
+performance:
+  # upload-rate: 5000
+  schedule:
+  - days:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    start: 0
+    duration: 1440
+
+jobs:
+  - name: archive_job
+    directories:
+    - source: 'y:\' 
+      destination: 'pictures'
+      include-regex:
+      - 'C:\\Users\\jwess\\Documents'
+      exclude-regex:
+      - '.*\\thumbs.db'
+      attr-exclude:
+      - System
+    priority: 2
+    # type: archive
+    storage-account: jaysbackup
+    # auth-key: 
+    auth-key-file: "..\\..\\..\\..\\authkey.yml"
+    metadata-cache-file: metadata.cache.bin
+    archive:
+      container: data-archive
+    delta:
+      container: data-delta
+    history:
+      container: data-history
+  - name: test_job
+    directories:
+    - source: 'c:\Users\jwess' 
+      destination: 'docs'
+      include-regex:
+      - 'C:\\Users\\jwess\\Documents\\.*'
+      - 'C:\\Users\\jwess\\Pictures\\.*'
+      - 'C:\\Users\\jwess\\Music\\.*'
+      exclude-regex:
+      - '.*\\thumbs.db'
+      attr-exclude:
+      - System
+    priority: 1
+    # type: archive
+    storage-account: jaysbackup
+    # auth-key: 
+    auth-key-file: "..\\..\\..\\..\\authkey.yml"
+    metadata-cache-file: metadata.cache.bin
+    archive:
+      container: test-archive
+    delta:
+      container: test-delta
+    history:
+      container: test-history
+      
+
+    

@@ -8,16 +8,17 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Azbackup;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
 using Google.Protobuf;
+using Azbackup.Proto;
+using azpb = Azbackup.Proto;
+using System.Text.RegularExpressions;
 
-
-namespace azbackup
+namespace Azbackup
 {
     public class DirectoryJob
     {
@@ -25,7 +26,16 @@ namespace azbackup
         public string Destination { get; set; }
 
         [YamlMember(Alias = "attr-exclude", ApplyNamingConventions = false)]
-        public string AttributeExclude { get; set; }
+        public string[] AttributeExclude { get; set; }
+
+        [YamlMember(Alias = "attr-include", ApplyNamingConventions = false)]
+        public string[] AttributeInclude { get; set;  }
+
+        [YamlMember(Alias = "include-regex", ApplyNamingConventions = false)]
+        public string[] IncludeRegex { get; set; }
+
+        [YamlMember(Alias = "exclude-regex", ApplyNamingConventions = false)]
+        public string[] ExcludeRegex { get; set; }
     }
 
     public class ContainerConfig
@@ -56,10 +66,66 @@ namespace azbackup
     }
 
 
+    public class Schedule
+    {
+        [YamlMember(Alias = "days", ApplyNamingConventions = false)]
+        public List<int> Days { get; set; }
+        
+        [YamlMember(Alias = "start", ApplyNamingConventions = false)]
+        public int StartTime { get; set; }
+
+        [YamlMember(Alias = "duration", ApplyNamingConventions = false)]
+        public int Duration { get; set; }
+
+        [YamlIgnore]
+        public bool IsActive
+        {
+            get
+            {
+                if (Duration == 0)
+                    return false;
+
+                DateTime now = DateTime.Now;
+
+                if (Days.Count > 0)
+                {
+                    // check to see this is a valid day
+                    if (!Days.Contains( (int) now.DayOfWeek))
+                        return false;
+                }
+
+                DateTime startTime = now.Date.AddMinutes(StartTime);
+                DateTime endTime = startTime.AddMinutes(Duration);
+
+                return (now >= startTime) && (now <= endTime);
+            }
+        }
+    }
+
+
     public class Performance
     {
         [YamlMember(Alias = "upload-rate", ApplyNamingConventions = false)]
         public int UploadRate { get; set; }
+
+        [YamlMember(Alias = "schedule", ApplyNamingConventions = false)]
+        public List<Schedule> Schedules { get; set; }
+
+        [YamlIgnore]
+        public bool IsActive
+        {
+            get
+            {
+                foreach (var schedule in Schedules)
+                {
+                    if (!schedule.IsActive)
+                        return false;
+                }
+
+                return true;
+            }
+        }
+
 
     }
 
@@ -80,13 +146,15 @@ namespace azbackup
     public class AzureBackup
     {
         public YAMLConfig YAMLConfig { get; set; }
+        
+
+        private ManualResetEvent stopFlag = new ManualResetEvent(false);
 
         private CloudStorageAccount account;
         private CloudBlobClient client;
         private CloudBlobContainer archiveContainer;
         private CloudBlobContainer deltaContainer;
         private CloudBlobContainer historyContainer;
-
 
         private Dictionary<string, long> archiveFileData = new Dictionary<string, long>();
         private Dictionary<string, long> deltaFileData = new Dictionary<string, long>();
@@ -97,6 +165,11 @@ namespace azbackup
             return $"DefaultEndpointsProtocol=https;AccountName={accountName};AccountKey={accountKey}";
         }
 
+
+        public void Stop()
+        {
+            stopFlag.Set();
+        }
 
         public void UploadDirectory(Job job, string rootDir, string currentDir, string destDir)
         {
@@ -131,16 +204,74 @@ namespace azbackup
             cacheBlock.DirInfo = new DirInfo() { Directory = currentDir };
 
             var fileInfos = dirInfo.EnumerateFiles();
+
+
+            DirectoryJob currentDirJob = job.Directories.Single(a => a.Source == rootDir);
+
+            //bool attrSystemInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "S", true) == 0) > 0;
+            //bool attrArchiveInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "A", true) == 0) > 0;
+            //bool attrHiddenInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "H", true) == 0) > 0;
+
+            bool attrSystemExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "S", true) == 0) > 0;
+            bool attrArchiveExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "A", true) == 0) > 0;
+            bool attrHiddenExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "H", true) == 0) > 0;
+
             foreach (var fileInfo in fileInfos)
             {
                 Console.WriteLine("Processing file {0}", fileInfo.Name);
 
-                if (fileInfo.Attributes.HasFlag(FileAttributes.System))
+                bool includeFile = true;
+                if (currentDirJob.IncludeRegex != null)
                 {
-                    Console.WriteLine("\tSkipping due to System file attribute...");
+                    includeFile = false;
+
+                    foreach (string s in currentDirJob.IncludeRegex)
+                    {
+                        Regex regex = new Regex(s);
+                        if (regex.IsMatch(fileInfo.FullName))
+                        {
+                            includeFile = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (currentDirJob.ExcludeRegex != null)
+                {
+                    foreach (string s in currentDirJob.ExcludeRegex)
+                    {
+                        Regex regex = new Regex(s);
+                        if (regex.IsMatch(fileInfo.FullName))
+                        {
+                            includeFile = false;
+                        }
+                    }
+                }
+
+                bool attrInclude = true;
+
+                if (attrSystemExclude && fileInfo.Attributes.HasFlag(FileAttributes.System))
+                {
+                    attrInclude = false;
+                    //Console.WriteLine("\tSkipping due to System file attribute...");
+                    //continue;
+                }
+
+                if (attrHiddenExclude && fileInfo.Attributes.HasFlag(FileAttributes.Hidden))
+                {
+                    attrInclude = false;
+                }
+
+                if (attrArchiveExclude && fileInfo.Attributes.HasFlag(FileAttributes.Archive))
+                {
+                    attrInclude = false;
+                }
+
+                if (!(attrInclude && includeFile))
+                {
                     continue;
                 }
-                    
+
                 string destBlobName = destDir + fileInfo.FullName.Substring(rootDir.Length).Replace('\\', '/');
 
                 bool storeArchive = false;
@@ -193,10 +324,10 @@ namespace azbackup
                         }
                         else
                         {
-                            Azbackup.FileInfo azFileInfo = new Azbackup.FileInfo()
+                            azpb.FileInfo azFileInfo = new azpb.FileInfo()
                             {
                                 Filename = fileInfo.Name,
-                                StorageTier = Azbackup.FileInfo.Types.StorageTier.Archive,
+                                StorageTier = azpb.FileInfo.Types.StorageTier.Archive,
                                 LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
                             };
 
@@ -211,10 +342,13 @@ namespace azbackup
                     Console.WriteLine("\tUploading {0} to archive storage...", fileInfo.Name);
                     UploadFile(fileInfo.FullName, archiveContainer, destBlobName, true);
 
-                    Azbackup.FileInfo azFileInfo = new Azbackup.FileInfo()
+                    if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
+                        return;
+
+                    azpb.FileInfo azFileInfo = new azpb.FileInfo()
                     {
                         Filename = fileInfo.Name,
-                        StorageTier = Azbackup.FileInfo.Types.StorageTier.Archive,
+                        StorageTier = azpb.FileInfo.Types.StorageTier.Archive,
                         LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
                     };
 
@@ -263,10 +397,13 @@ namespace azbackup
                     Console.WriteLine("\tUploading {0} to delta storage...", fileInfo.Name);
                     UploadFile(fileInfo.FullName, deltaContainer, destBlobName);
 
-                    Azbackup.FileInfo azFileInfo = new Azbackup.FileInfo()
+                    if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
+                        return;
+
+                    azpb.FileInfo azFileInfo = new azpb.FileInfo()
                     {
                         Filename = fileInfo.Name,
-                        StorageTier = Azbackup.FileInfo.Types.StorageTier.Delta,
+                        StorageTier = azpb.FileInfo.Types.StorageTier.Delta,
                         LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
                     };
 
@@ -289,6 +426,9 @@ namespace azbackup
             var dirInfos = dirInfo.GetDirectories();
             foreach (var di2 in dirInfos)
             {
+                if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
+                    return;
+
                 UploadDirectory(job, rootDir, di2.FullName, destDir);
             }
 
@@ -343,6 +483,11 @@ namespace azbackup
 
                     for (int i=lastCommittedBlock+1; i < totalBlocks; i++)
                     {
+                        if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
+                        {
+                            return;
+                        }
+
                         Console.Write("\tSending block {0} of {1}\r", i, totalBlocks);
 
                         fs.Seek((long)i * BlockSize, SeekOrigin.Begin);
@@ -456,11 +601,11 @@ namespace azbackup
 
                                 switch (fileInfo.StorageTier)
                                 {
-                                case Azbackup.FileInfo.Types.StorageTier.Archive:
+                                case azpb.FileInfo.Types.StorageTier.Archive:
                                     archiveFileData[path] = fileInfo.LastWriteUTCTicks;
                                     break;
 
-                                case Azbackup.FileInfo.Types.StorageTier.Delta:
+                                case azpb.FileInfo.Types.StorageTier.Delta:
                                     deltaFileData[path] = fileInfo.LastWriteUTCTicks;
                                     break;
                                 }
@@ -484,44 +629,9 @@ namespace azbackup
                     destDir += '/';
 
                 UploadDirectory(job, di.FullName, di.FullName, destDir);
-            }
-        }
 
-
-        
-
-
-        static void Main(string[] args)
-        {
-            var deserializer = new DeserializerBuilder()
-                                   .WithNamingConvention(new CamelCaseNamingConvention())
-                                   .IgnoreUnmatchedProperties()
-                                   .Build();
-
-            StreamReader reader = new StreamReader("config.yml");
-
-            YAMLConfig yamlConfig = null;
-
-            try
-            {
-                yamlConfig = deserializer.Deserialize<YAMLConfig>(reader);
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
-                Environment.Exit(1);
-            }
-
-            AzureBackup azureBackup = new AzureBackup()
-            {
-                YAMLConfig = yamlConfig
-            };
-
-            List<Job> jobs = yamlConfig.Jobs.OrderBy(a => a.Priority).ToList();
-
-            foreach (Job job in jobs)
-            {
-                azureBackup.ExecuteJob(job);
+                if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
+                    return;
             }
         }
 
