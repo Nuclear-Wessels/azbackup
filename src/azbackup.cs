@@ -45,6 +45,7 @@ namespace Azbackup
 
     public class Job
     {
+        public string Name { get; set; }
         public List<DirectoryJob> Directories { get; set; }
         public ContainerConfig Archive { get; set; }
         public ContainerConfig Delta { get; set; }
@@ -166,6 +167,9 @@ namespace Azbackup
         }
 
 
+        private NLog.Logger logger;
+
+
         public void Stop()
         {
             stopFlag.Set();
@@ -205,12 +209,7 @@ namespace Azbackup
 
             var fileInfos = dirInfo.EnumerateFiles();
 
-
             DirectoryJob currentDirJob = job.Directories.Single(a => a.Source == rootDir);
-
-            //bool attrSystemInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "S", true) == 0) > 0;
-            //bool attrArchiveInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "A", true) == 0) > 0;
-            //bool attrHiddenInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "H", true) == 0) > 0;
 
             bool attrSystemExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "S", true) == 0) > 0;
             bool attrArchiveExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "A", true) == 0) > 0;
@@ -552,6 +551,30 @@ namespace Azbackup
 
         public void ExecuteJob(Job job)
         {
+            var config = new NLog.Config.LoggingConfiguration();
+
+            string logDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.Create),
+                "azbackup_logs" );
+
+            string logFileName = Path.Combine(logDir, "azbackup_" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".log");
+
+            var logFile = new NLog.Targets.FileTarget("logfile") { FileName = logFileName };
+            config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logFile);
+            logFile.Layout = new NLog.Layouts.CsvLayout() { Layout = "${longdate},${level:uppercase=true},${message},${exception:format=tostring}" };
+
+#if DEBUG
+            var logConsole = new NLog.Targets.ColoredConsoleTarget("logconsole");
+            //logConsole.Layout = new NLog.Layouts.SimpleLayout() { Text = "${longdate}|${level:uppercase=true}|${message}|${exception:format=tostring}" };
+            config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logConsole);
+#endif
+
+            NLog.LogManager.Configuration = config;
+
+            logger = NLog.LogManager.GetCurrentClassLogger();
+
+            logger.Info("Starting job {0}...", job.Name);
+
             string authKey;
 
             if (job.AuthKey != null)
@@ -569,7 +592,11 @@ namespace Azbackup
                 authKey = authKeyFile.AuthKey;
             }
             else
+            {
+                logger.Error("No authentication key found.");
                 throw new InvalidOperationException("No authenticiation key found.");
+            }
+                
 
             account = CloudStorageAccount.Parse(GetConnectionString(job.StorageAccount, authKey));
             client = account.CreateCloudBlobClient();
@@ -586,9 +613,13 @@ namespace Azbackup
             
             if (job.MetadataCacheFile != null)
             {
+                logger.Info("Found metadata cache file: {0}", job.MetadataCacheFile);
+
                 // open the metadata file
                 using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.OpenOrCreate, FileAccess.Read, FileShare.Read))
                 {
+                    int counter = 0;
+
                     try
                     {
                         while (true)
@@ -597,6 +628,8 @@ namespace Azbackup
 
                             foreach (var fileInfo in cacheBlock.DirInfo.FileInfos)
                             {
+                                counter++;
+
                                 string path = Path.Combine(cacheBlock.DirInfo.Directory, fileInfo.Filename);
 
                                 switch (fileInfo.StorageTier)
@@ -612,16 +645,20 @@ namespace Azbackup
                             }
                         }
                     }
-                    catch (InvalidProtocolBufferException)
+                    catch (InvalidProtocolBufferException ipbe)
                     {
                         // we're done, so bail out
+                        logger.Warn(ipbe, "Unable to parse protobuf.");
                     }
+
+                    logger.Debug("Processed {0} files in metadata cache file.", counter);
                 }
             }
             
 
             foreach (var dirJob in job.Directories)
             {
+
                 DirectoryInfo di = new DirectoryInfo(dirJob.Source);
 
                 string destDir = dirJob.Destination.Replace('\\', '/');
@@ -631,7 +668,10 @@ namespace Azbackup
                 UploadDirectory(job, di.FullName, di.FullName, destDir);
 
                 if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
+                {
                     return;
+                }
+                    
             }
         }
 

@@ -1,4 +1,9 @@
 ﻿
+logging:
+  - name: file
+    type: file
+    filename: azbackup_log.log
+
 performance:
   # upload-rate: 5000
   schedule:
@@ -19,7 +24,7 @@ jobs:
     - source: 'y:\' 
       destination: 'pictures'
       include-regex:
-      - 'C:\\Users\\jwess\\Documents'
+      - 'C:\\Users\\jwess\\Documents\.*'
       exclude-regex:
       - '.*\\thumbs.db'
       attr-exclude:
