@@ -183,7 +183,7 @@ namespace Azbackup
             
             string currentDestDir = destDir + targetDir.Replace('\\', '/') + ((targetDir.Length > 0) ? "/" : "");
 
-            Console.WriteLine("Processing directory: {0} to {1}", currentDir, currentDestDir);
+            logger.Info("Processing directory: {0} to {1}", currentDir, currentDestDir);
 
             IEnumerable<CloudBlockBlob> archiveBlobItems = null;
             IEnumerable<CloudBlockBlob> deltaBlobItems = null;
@@ -206,6 +206,7 @@ namespace Azbackup
 
             CacheBlock cacheBlock = new CacheBlock();
             cacheBlock.DirInfo = new DirInfo() { Directory = currentDir };
+            Mutex cacheBlockMutex = new Mutex();
 
             var fileInfos = dirInfo.EnumerateFiles();
 
@@ -217,7 +218,7 @@ namespace Azbackup
 
             foreach (var fileInfo in fileInfos)
             {
-                Console.WriteLine("Processing file {0}", fileInfo.Name);
+                logger.Debug("Processing file {0}", fileInfo.Name);
 
                 bool includeFile = true;
                 if (currentDirJob.IncludeRegex != null)
@@ -252,13 +253,14 @@ namespace Azbackup
                 if (attrSystemExclude && fileInfo.Attributes.HasFlag(FileAttributes.System))
                 {
                     attrInclude = false;
-                    //Console.WriteLine("\tSkipping due to System file attribute...");
-                    //continue;
+                    logger.Debug("Skipping due to System file attribute...");
                 }
 
                 if (attrHiddenExclude && fileInfo.Attributes.HasFlag(FileAttributes.Hidden))
                 {
+
                     attrInclude = false;
+                    logger.Debug("Skipping due to Hidden file attribute...");
                 }
 
                 if (attrArchiveExclude && fileInfo.Attributes.HasFlag(FileAttributes.Archive))
@@ -338,7 +340,7 @@ namespace Azbackup
 
                 if (storeArchive)
                 {
-                    Console.WriteLine("\tUploading {0} to archive storage...", fileInfo.Name);
+                    logger.Info("\tUploading {0} to archive storage...", fileInfo.Name);
                     UploadFile(fileInfo.FullName, archiveContainer, destBlobName, true);
 
                     if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
@@ -361,7 +363,7 @@ namespace Azbackup
                     var deltaBlobItem = deltaBlobItems.SingleOrDefault(a => a.Name == destBlobName);
                     historyItem.StartCopy(deltaBlobItem);
 
-                    Console.WriteLine("\tCopying {0} to {1}...", deltaBlobItem.Name, historyBlobName);
+                    logger.Info("\tCopying {0} to {1}...", deltaBlobItem.Name, historyBlobName);
 
                     bool done = false;
                     while (!done)
@@ -375,7 +377,7 @@ namespace Azbackup
                         case CopyStatus.Pending:
                             Thread.Sleep(100);
                             break;
-                                        
+
                         case CopyStatus.Aborted:
                             done = true;
                             break;
@@ -393,7 +395,7 @@ namespace Azbackup
 
                 if (storeDelta)
                 {
-                    Console.WriteLine("\tUploading {0} to delta storage...", fileInfo.Name);
+                    logger.Info("\tUploading {0} to delta storage...", fileInfo.Name);
                     UploadFile(fileInfo.FullName, deltaContainer, destBlobName);
 
                     if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
@@ -410,13 +412,13 @@ namespace Azbackup
                 }
             }
 
-
             if (job.MetadataCacheFile != null && cacheBlock.DirInfo.FileInfos.Count > 0)
             {
-                Console.WriteLine("Writing {0} files to {1} cache...", cacheBlock.DirInfo.FileInfos.Count, job.MetadataCacheFile);
+                logger.Info("Writing {0} files to {1} cache...", cacheBlock.DirInfo.FileInfos.Count, job.MetadataCacheFile);
                 using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.Append, FileAccess.Write, FileShare.Read))
                 {
                     cacheBlock.WriteDelimitedTo(fs);
+                    fs.Flush();
                 }
             }
 
@@ -487,7 +489,7 @@ namespace Azbackup
                             return;
                         }
 
-                        Console.Write("\tSending block {0} of {1}\r", i, totalBlocks);
+                        logger.Debug("\tSending block {0} of {1}...", i, totalBlocks);
 
                         fs.Seek((long)i * BlockSize, SeekOrigin.Begin);
                         int bytesRead = fs.Read(buffer, 0, (int) BlockSize);
@@ -516,8 +518,6 @@ namespace Azbackup
                             }
                         }
                     }
-
-                    Console.WriteLine();
                 }
 
                 List<string> blockNamesList = new List<string>();
@@ -565,7 +565,7 @@ namespace Azbackup
 
 #if DEBUG
             var logConsole = new NLog.Targets.ColoredConsoleTarget("logconsole");
-            //logConsole.Layout = new NLog.Layouts.SimpleLayout() { Text = "${longdate}|${level:uppercase=true}|${message}|${exception:format=tostring}" };
+            logConsole.Layout = new NLog.Layouts.SimpleLayout() { Text = "${longdate}|${level:uppercase=true}|${message}|${exception:format=tostring}" };
             config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logConsole);
 #endif
 
@@ -616,15 +616,19 @@ namespace Azbackup
                 logger.Info("Found metadata cache file: {0}", job.MetadataCacheFile);
 
                 // open the metadata file
-                using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.OpenOrCreate, FileAccess.Read, FileShare.Read))
+                using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read))
                 {
                     int counter = 0;
+
+                    long lastGoodPos = 0;
 
                     try
                     {
                         while (true)
                         {
                             CacheBlock cacheBlock = CacheBlock.Parser.ParseDelimitedFrom(fs);
+
+                            lastGoodPos = fs.Position;
 
                             foreach (var fileInfo in cacheBlock.DirInfo.FileInfos)
                             {
@@ -649,6 +653,7 @@ namespace Azbackup
                     {
                         // we're done, so bail out
                         logger.Warn(ipbe, "Unable to parse protobuf.");
+                        fs.SetLength(lastGoodPos);
                     }
 
                     logger.Debug("Processed {0} files in metadata cache file.", counter);

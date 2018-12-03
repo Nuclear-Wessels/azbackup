@@ -16,12 +16,12 @@ namespace Azbackup
     {
         public static void Main(string[] args)
         {
-            string configFile = "..\\..\\config.yml";
+            string configFile = "..\\..\\..\\..\\config_test.yml";
 
             var deserializer = new DeserializerBuilder()
-           .WithNamingConvention(new CamelCaseNamingConvention())
-           .IgnoreUnmatchedProperties()
-           .Build();
+                                   .WithNamingConvention(new CamelCaseNamingConvention())
+                                   .IgnoreUnmatchedProperties()
+                                   .Build();
 
             YAMLConfig yamlConfig = null;
 
