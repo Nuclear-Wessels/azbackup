@@ -16,7 +16,7 @@ namespace Azbackup
     {
         public static void Main(string[] args)
         {
-            string configFile = "..\\..\\..\\..\\config_test.yml";
+            string configFile = "..\\..\\..\\..\\config_test_md5.yml";
 
             var deserializer = new DeserializerBuilder()
                                    .WithNamingConvention(new CamelCaseNamingConvention())

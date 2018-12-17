@@ -24,18 +24,18 @@ namespace Azbackup.Proto {
     static AzbackupProtoReflection() {
       byte[] descriptorData = global::System.Convert.FromBase64String(
           string.Concat(
-            "ChRhemJhY2t1cF9wcm90by5wcm90bxIOYXpiYWNrdXAucHJvdG8imQEKCEZp",
+            "ChRhemJhY2t1cF9wcm90by5wcm90bxIOYXpiYWNrdXAucHJvdG8ipgEKCEZp",
             "bGVJbmZvEhAKCGZpbGVuYW1lGAEgASgJEhkKEWxhc3RXcml0ZVVUQ1RpY2tz",
             "GAIgASgDEjkKC3N0b3JhZ2VUaWVyGAMgASgOMiQuYXpiYWNrdXAucHJvdG8u",
-            "RmlsZUluZm8uU3RvcmFnZVRpZXIiJQoLU3RvcmFnZVRpZXISCwoHQXJjaGl2",
-            "ZRAAEgkKBURlbHRhEAEiSQoHRGlySW5mbxIRCglkaXJlY3RvcnkYASABKAkS",
-            "KwoJZmlsZUluZm9zGAIgAygLMhguYXpiYWNrdXAucHJvdG8uRmlsZUluZm8i",
-            "NgoKQ2FjaGVCbG9jaxIoCgdkaXJJbmZvGAEgASgLMhcuYXpiYWNrdXAucHJv",
-            "dG8uRGlySW5mb2IGcHJvdG8z"));
+            "RmlsZUluZm8uU3RvcmFnZVRpZXISCwoDbWQ1GAQgASgMIiUKC1N0b3JhZ2VU",
+            "aWVyEgsKB0FyY2hpdmUQABIJCgVEZWx0YRABIkkKB0RpckluZm8SEQoJZGly",
+            "ZWN0b3J5GAEgASgJEisKCWZpbGVJbmZvcxgCIAMoCzIYLmF6YmFja3VwLnBy",
+            "b3RvLkZpbGVJbmZvIjYKCkNhY2hlQmxvY2sSKAoHZGlySW5mbxgBIAEoCzIX",
+            "LmF6YmFja3VwLnByb3RvLkRpckluZm9iBnByb3RvMw=="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(null, new pbr::GeneratedClrTypeInfo[] {
-            new pbr::GeneratedClrTypeInfo(typeof(global::Azbackup.Proto.FileInfo), global::Azbackup.Proto.FileInfo.Parser, new[]{ "Filename", "LastWriteUTCTicks", "StorageTier" }, null, new[]{ typeof(global::Azbackup.Proto.FileInfo.Types.StorageTier) }, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::Azbackup.Proto.FileInfo), global::Azbackup.Proto.FileInfo.Parser, new[]{ "Filename", "LastWriteUTCTicks", "StorageTier", "Md5" }, null, new[]{ typeof(global::Azbackup.Proto.FileInfo.Types.StorageTier) }, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::Azbackup.Proto.DirInfo), global::Azbackup.Proto.DirInfo.Parser, new[]{ "Directory", "FileInfos" }, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::Azbackup.Proto.CacheBlock), global::Azbackup.Proto.CacheBlock.Parser, new[]{ "DirInfo" }, null, null, null)
           }));
@@ -72,6 +72,7 @@ namespace Azbackup.Proto {
       filename_ = other.filename_;
       lastWriteUTCTicks_ = other.lastWriteUTCTicks_;
       storageTier_ = other.storageTier_;
+      md5_ = other.md5_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -113,6 +114,17 @@ namespace Azbackup.Proto {
       }
     }
 
+    /// <summary>Field number for the "md5" field.</summary>
+    public const int Md5FieldNumber = 4;
+    private pb::ByteString md5_ = pb::ByteString.Empty;
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    public pb::ByteString Md5 {
+      get { return md5_; }
+      set {
+        md5_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     public override bool Equals(object other) {
       return Equals(other as FileInfo);
@@ -129,6 +141,7 @@ namespace Azbackup.Proto {
       if (Filename != other.Filename) return false;
       if (LastWriteUTCTicks != other.LastWriteUTCTicks) return false;
       if (StorageTier != other.StorageTier) return false;
+      if (Md5 != other.Md5) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -138,6 +151,7 @@ namespace Azbackup.Proto {
       if (Filename.Length != 0) hash ^= Filename.GetHashCode();
       if (LastWriteUTCTicks != 0L) hash ^= LastWriteUTCTicks.GetHashCode();
       if (StorageTier != 0) hash ^= StorageTier.GetHashCode();
+      if (Md5.Length != 0) hash ^= Md5.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -163,6 +177,10 @@ namespace Azbackup.Proto {
         output.WriteRawTag(24);
         output.WriteEnum((int) StorageTier);
       }
+      if (Md5.Length != 0) {
+        output.WriteRawTag(34);
+        output.WriteBytes(Md5);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -179,6 +197,9 @@ namespace Azbackup.Proto {
       }
       if (StorageTier != 0) {
         size += 1 + pb::CodedOutputStream.ComputeEnumSize((int) StorageTier);
+      }
+      if (Md5.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeBytesSize(Md5);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -199,6 +220,9 @@ namespace Azbackup.Proto {
       }
       if (other.StorageTier != 0) {
         StorageTier = other.StorageTier;
+      }
+      if (other.Md5.Length != 0) {
+        Md5 = other.Md5;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -221,6 +245,10 @@ namespace Azbackup.Proto {
           }
           case 24: {
             storageTier_ = (global::Azbackup.Proto.FileInfo.Types.StorageTier) input.ReadEnum();
+            break;
+          }
+          case 34: {
+            Md5 = input.ReadBytes();
             break;
           }
         }
