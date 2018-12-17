@@ -756,11 +756,9 @@ namespace Azbackup
             config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logFile);
             logFile.Layout = new NLog.Layouts.CsvLayout() { Layout = "${longdate},${level:uppercase=true},${message},${exception:format=tostring}" };
 
-#if DEBUG
             var logConsole = new NLog.Targets.ColoredConsoleTarget("logconsole");
-            logConsole.Layout = new NLog.Layouts.SimpleLayout() { Text = "${longdate}|${level:uppercase=true}|${message}|${exception:format=tostring}" };
+            logConsole.Layout = new NLog.Layouts.SimpleLayout() { Text = "${longdate}|${level:uppercase=true}|${message}" };
             config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logConsole);
-#endif
 
             NLog.LogManager.Configuration = config;
 
