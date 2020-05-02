@@ -1,0 +1,43 @@
+﻿
+logging:
+  - name: file
+    type: file
+    filename: azbackup_log.log
+
+performance:
+  # upload-rate: 5000
+  schedule:
+  - days:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    start: 0
+    duration: 1440
+
+jobs:
+  - name: archive_job
+    directories:
+    - source: 'y:\' 
+      destination: 'pictures'
+      include-regex:
+      - '.*'
+      exclude-regex:
+      - '.*\\thumbs.db'
+      attr-exclude:
+      - System
+    priority: 2
+    storage-account: jaysbackup
+    auth-key-file: "..\\..\\..\\..\\authkey.yml"
+    metadata-cache-file: metadata_test_md5.cache.bin
+    archive:
+      container: test-archive
+    delta:
+      container: test-delta
+    history:
+      container: test-history
+  
+    

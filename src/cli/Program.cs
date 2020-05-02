@@ -16,12 +16,32 @@ namespace Azbackup
     {
         public static void Main(string[] args)
         {
-            string configFile = "..\\..\\config.yml";
+            if (args.Length < 2)
+            {
+                Console.WriteLine("Usage: azbackup.exe backup {config file}");
+                System.Environment.Exit(-1);    
+            }
+
+            string verb = args[0];
+
+            if (String.Compare(verb, "backup", true) != 0)
+            {
+                Console.WriteLine("Only 'backup' verb is supported.");
+                System.Environment.Exit(-1);
+            }
+
+            string configFile = args[1];
+
+            if (!File.Exists(args[1]))
+            {
+                Console.WriteLine("Unable to find config file: {0}", args[1]);
+                System.Environment.Exit(-1);
+            }
 
             var deserializer = new DeserializerBuilder()
-           .WithNamingConvention(new CamelCaseNamingConvention())
-           .IgnoreUnmatchedProperties()
-           .Build();
+                                   .WithNamingConvention(new CamelCaseNamingConvention())
+                                   .IgnoreUnmatchedProperties()
+                                   .Build();
 
             YAMLConfig yamlConfig = null;
 
@@ -34,7 +54,7 @@ namespace Azbackup
                 catch (Exception e)
                 {
                     Console.WriteLine(e);
-                    return;
+                    System.Environment.Exit(-1);
                 }
             }
 

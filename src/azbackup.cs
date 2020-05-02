@@ -45,6 +45,7 @@ namespace Azbackup
 
     public class Job
     {
+        public string Name { get; set; }
         public List<DirectoryJob> Directories { get; set; }
         public ContainerConfig Archive { get; set; }
         public ContainerConfig Delta { get; set; }
@@ -156,9 +157,12 @@ namespace Azbackup
         private CloudBlobContainer deltaContainer;
         private CloudBlobContainer historyContainer;
 
-        private Dictionary<string, long> archiveFileData = new Dictionary<string, long>();
-        private Dictionary<string, long> deltaFileData = new Dictionary<string, long>();
+        private Dictionary<string, azpb.FileInfo> archiveFileData = new Dictionary<string, azpb.FileInfo>();
+        private Dictionary<string, azpb.FileInfo> deltaFileData = new Dictionary<string, azpb.FileInfo>();
 
+        private const string LastWriteTimeUTCKey   = "LastWriteTimeUTC";
+        private const string LastWriteTimeUTCTicksKey = "LastWriteTimeUTCTicks";
+        private const string ContentMD5Key = "ContentMD5";
 
         private static string GetConnectionString(string accountName, string accountKey)
         {
@@ -166,10 +170,37 @@ namespace Azbackup
         }
 
 
+        private NLog.Logger logger;
+
+
         public void Stop()
         {
             stopFlag.Set();
         }
+
+  
+
+
+
+        protected byte[] ComputeHash(string fullPath)
+        {
+            System.IO.FileInfo fi = new System.IO.FileInfo(fullPath);
+            logger.Info("\tComputing hash for {0}...", fi.Name);
+            using (MD5 md5 = MD5.Create())
+            {
+                using (FileStream fs = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    return md5.ComputeHash(fs);
+                }
+            }
+        }
+
+
+        public static string ConvertToHexString(byte[] bytes)
+        {
+            return bytes.Select(a => String.Format("{0:X2}", a)).Aggregate( (a, b) => a + b);
+        }
+
 
         public void UploadDirectory(Job job, string rootDir, string currentDir, string destDir)
         {
@@ -179,7 +210,7 @@ namespace Azbackup
             
             string currentDestDir = destDir + targetDir.Replace('\\', '/') + ((targetDir.Length > 0) ? "/" : "");
 
-            Console.WriteLine("Processing directory: {0} to {1}", currentDir, currentDestDir);
+            logger.Info("Processing directory: {0} to {1}", currentDir, currentDestDir);
 
             IEnumerable<CloudBlockBlob> archiveBlobItems = null;
             IEnumerable<CloudBlockBlob> deltaBlobItems = null;
@@ -202,15 +233,11 @@ namespace Azbackup
 
             CacheBlock cacheBlock = new CacheBlock();
             cacheBlock.DirInfo = new DirInfo() { Directory = currentDir };
+            Mutex cacheBlockMutex = new Mutex();
 
             var fileInfos = dirInfo.EnumerateFiles();
 
-
             DirectoryJob currentDirJob = job.Directories.Single(a => a.Source == rootDir);
-
-            //bool attrSystemInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "S", true) == 0) > 0;
-            //bool attrArchiveInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "A", true) == 0) > 0;
-            //bool attrHiddenInclude = currentDirJob.AttributeInclude.Count(a => String.Compare(a.Substring(0, 1), "H", true) == 0) > 0;
 
             bool attrSystemExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "S", true) == 0) > 0;
             bool attrArchiveExclude = currentDirJob.AttributeExclude.Count(a => String.Compare(a.Substring(0, 1), "A", true) == 0) > 0;
@@ -218,7 +245,7 @@ namespace Azbackup
 
             foreach (var fileInfo in fileInfos)
             {
-                Console.WriteLine("Processing file {0}", fileInfo.Name);
+                logger.Info("Processing file {0}", fileInfo.Name);
 
                 bool includeFile = true;
                 if (currentDirJob.IncludeRegex != null)
@@ -253,13 +280,14 @@ namespace Azbackup
                 if (attrSystemExclude && fileInfo.Attributes.HasFlag(FileAttributes.System))
                 {
                     attrInclude = false;
-                    //Console.WriteLine("\tSkipping due to System file attribute...");
-                    //continue;
+                    logger.Info("\tSkipping due to System file attribute...");
                 }
 
                 if (attrHiddenExclude && fileInfo.Attributes.HasFlag(FileAttributes.Hidden))
                 {
+
                     attrInclude = false;
+                    logger.Info("\tSkipping due to Hidden file attribute...");
                 }
 
                 if (attrArchiveExclude && fileInfo.Attributes.HasFlag(FileAttributes.Archive))
@@ -276,23 +304,43 @@ namespace Azbackup
 
                 bool storeArchive = false;
                 bool storeDelta = false;
+                bool updateDeltaTime = false;
+                bool updateDeltaHash = false;
                 bool copyHistory = false;
+                bool updateArchiveCache = false;
+                bool updateDeltaCache = false;
+
+                byte[] md5Hash = null;
+
+                bool checkDeltaStorage = false;
 
                 if (archiveFileData.ContainsKey(fileInfo.FullName))
                 {
-                    if (archiveFileData[fileInfo.FullName] != fileInfo.LastWriteTimeUtc.Ticks)
+                    if (archiveFileData[fileInfo.FullName].LastWriteUTCTicks != fileInfo.LastWriteTimeUtc.Ticks)
                     {
-                        if (deltaFileData.ContainsKey(fileInfo.FullName))
+                        // check to see if there's an MD5 property
+                        if (archiveFileData[fileInfo.FullName].Md5.Length > 0)
                         {
-                            if (deltaFileData[fileInfo.FullName] != fileInfo.LastAccessTimeUtc.Ticks)
+                            if (md5Hash == null)
+                                md5Hash = ComputeHash(fileInfo.FullName);
+
+                            if (archiveFileData[fileInfo.FullName].Md5.SequenceEqual(md5Hash))
                             {
-                                storeDelta = copyHistory = true;
+                                updateArchiveCache = true;
+                            }
+                            else 
+                            {
+                                checkDeltaStorage = true;
                             }
                         }
-                        else
+                        else 
                         {
-                            storeDelta = true;
+                            checkDeltaStorage = true;
                         }
+                    }
+                    else
+                    {
+                        // nothing to do
                     }
                 }
                 else
@@ -301,37 +349,124 @@ namespace Azbackup
 
                     if (archiveBlobItem == null)
                     {
+                        md5Hash = ComputeHash(fileInfo.FullName);
+
                         storeArchive = true;
                     }
                     else
                     {
                         archiveBlobItem.FetchAttributes();
-                        long lastWriteUTCTicks = long.Parse(archiveBlobItem.Metadata["LastWriteTimeUTCTicks"]);
+                        long lastWriteUTCTicks = long.Parse(archiveBlobItem.Metadata[LastWriteTimeUTCTicksKey]);
+                        byte[] blobMd5Hash = Convert.FromBase64String(archiveBlobItem.Metadata[ContentMD5Key]);
 
                         if (lastWriteUTCTicks != fileInfo.LastWriteTimeUtc.Ticks)
                         {
-                            // Archive container can't modify content, so we'll check the Delta blob
-                            var deltaBlobItem = deltaBlobItems.SingleOrDefault(a => a.Name == destBlobName);
-                            if (deltaBlobItem == null)
+                            // check the content
+                            if (md5Hash == null)
+                                md5Hash = ComputeHash(fileInfo.FullName);
+
+                            if (!md5Hash.SequenceEqual(blobMd5Hash))
                             {
-                                storeDelta = true;
-                            }
-                            else
-                            {
-                                storeDelta = true;
-                                copyHistory = true;
+                                // the file has changed, so put it in delta storage
+                                checkDeltaStorage = true;
                             }
                         }
                         else
                         {
-                            azpb.FileInfo azFileInfo = new azpb.FileInfo()
-                            {
-                                Filename = fileInfo.Name,
-                                StorageTier = azpb.FileInfo.Types.StorageTier.Archive,
-                                LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
-                            };
+                            // file times are equal, so store the hash in the cache
+                            md5Hash = blobMd5Hash;
+                            updateArchiveCache = true;
+                        }
 
-                            cacheBlock.DirInfo.FileInfos.Add(azFileInfo);
+                    }
+                }
+
+
+                if (checkDeltaStorage)
+                {
+                    logger.Info("\tChecking delta storage container...");
+                    if (deltaFileData.ContainsKey(fileInfo.FullName))
+                    {
+                        if (deltaFileData[fileInfo.FullName].LastWriteUTCTicks != fileInfo.LastWriteTimeUtc.Ticks)
+                        {
+                            // check the MD5
+                            if (deltaFileData[fileInfo.FullName].Md5.Length > 0)
+                            {
+                                // check to see if the hashes are equal
+                                if (md5Hash == null)
+                                {
+                                    md5Hash = ComputeHash(fileInfo.FullName);
+                                }
+
+                                if (md5Hash.SequenceEqual(deltaFileData[fileInfo.FullName].Md5))
+                                {
+                                    logger.Info("\tHashes are equal.  Updating time.");
+                                    updateDeltaTime = true;
+                                }
+                                else
+                                {
+                                    logger.Info("\tHashes are not equal.  Storing to delta containter.");
+                                    storeDelta = copyHistory = updateDeltaTime = updateDeltaHash = true;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // check to see if there's an MD5 time, if not compute it
+                            if (deltaFileData[fileInfo.FullName].Md5.Length == 0)
+                            {
+                                if (md5Hash == null)
+                                {
+                                    md5Hash = ComputeHash(fileInfo.FullName);
+                                }
+
+                                updateDeltaCache = true;
+                            }
+
+                        }
+                        
+                    }
+                    else
+                    {
+                        // no local metadata, so check the blob online
+                        var deltaBlobItem = deltaBlobItems.SingleOrDefault(a => a.Name == destBlobName);
+                        if (deltaBlobItem == null)
+                        {
+                            storeDelta = true;
+                        }
+                        else
+                        {
+                            // blob exists, so check it's file time
+                            deltaBlobItem.FetchAttributes();
+                            long deltaTimeTicks = long.Parse(deltaBlobItem.Metadata[LastWriteTimeUTCTicksKey]);
+                            if (deltaTimeTicks != fileInfo.LastWriteTimeUtc.Ticks)
+                            {
+                                // file time are different, so check the MD5
+                                if (deltaBlobItem.Metadata.ContainsKey(ContentMD5Key))
+                                {
+                                    byte[] blobMd5 = Convert.FromBase64String(deltaBlobItem.Metadata[ContentMD5Key]);
+
+                                    if (md5Hash == null)
+                                        md5Hash = ComputeHash(fileInfo.FullName);
+
+                                    if (!blobMd5.SequenceEqual(md5Hash))
+                                    {
+                                        storeDelta = true;
+                                        copyHistory = true;
+                                    }
+                                }
+                                else
+                                {
+                                    // no hash, so store it to delta
+                                    storeDelta = true;
+                                    copyHistory = true;
+                                }
+
+                            }
+                            else
+                            {
+                                logger.Info("\tStorage times are equal.");
+                            }
                         }
 
                     }
@@ -339,21 +474,19 @@ namespace Azbackup
 
                 if (storeArchive)
                 {
-                    Console.WriteLine("\tUploading {0} to archive storage...", fileInfo.Name);
-                    UploadFile(fileInfo.FullName, archiveContainer, destBlobName, true);
+                    logger.Info("\tUploading {0} to archive storage...", fileInfo.Name);
+
+                    if (md5Hash == null)
+                        md5Hash = ComputeHash(fileInfo.FullName);
+
+                    UploadFile(fileInfo.FullName, archiveContainer, destBlobName, md5Hash, true);
 
                     if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
                         return;
 
-                    azpb.FileInfo azFileInfo = new azpb.FileInfo()
-                    {
-                        Filename = fileInfo.Name,
-                        StorageTier = azpb.FileInfo.Types.StorageTier.Archive,
-                        LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
-                    };
-
-                    cacheBlock.DirInfo.FileInfos.Add(azFileInfo);
+                    updateArchiveCache = true;
                 }
+
 
                 if (copyHistory)
                 {
@@ -362,7 +495,7 @@ namespace Azbackup
                     var deltaBlobItem = deltaBlobItems.SingleOrDefault(a => a.Name == destBlobName);
                     historyItem.StartCopy(deltaBlobItem);
 
-                    Console.WriteLine("\tCopying {0} to {1}...", deltaBlobItem.Name, historyBlobName);
+                    logger.Info("\tCopying {0} to {1}...", deltaBlobItem.Name, historyBlobName);
 
                     bool done = false;
                     while (!done)
@@ -376,7 +509,7 @@ namespace Azbackup
                         case CopyStatus.Pending:
                             Thread.Sleep(100);
                             break;
-                                        
+
                         case CopyStatus.Aborted:
                             done = true;
                             break;
@@ -394,30 +527,88 @@ namespace Azbackup
 
                 if (storeDelta)
                 {
-                    Console.WriteLine("\tUploading {0} to delta storage...", fileInfo.Name);
-                    UploadFile(fileInfo.FullName, deltaContainer, destBlobName);
+                    if (md5Hash == null)
+                        md5Hash = ComputeHash(fileInfo.FullName);
+
+                    logger.Info("\tUploading {0} to delta storage...", fileInfo.Name);
+                    UploadFile(fileInfo.FullName, deltaContainer, destBlobName, md5Hash);
 
                     if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
                         return;
 
-                    azpb.FileInfo azFileInfo = new azpb.FileInfo()
+                    updateDeltaCache = true;
+                }
+
+                if (updateDeltaHash || updateDeltaTime)
+                {
+                    CloudBlockBlob deltaBlobItem = deltaBlobItems.Single(a => a.Name == destBlobName);
+                    deltaBlobItem.FetchAttributes();
+
+                    if (updateDeltaHash)
                     {
-                        Filename = fileInfo.Name,
-                        StorageTier = azpb.FileInfo.Types.StorageTier.Delta,
-                        LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks
+                        if (md5Hash == null)
+                            md5Hash = ComputeHash(fileInfo.FullName);
+
+                        deltaBlobItem.Metadata[ContentMD5Key] = Convert.ToBase64String(md5Hash);
+
+                        logger.Info("\tUpdating delta blob hash...");
+                    }
+
+                    if (updateDeltaTime)
+                    {
+                        deltaBlobItem.Metadata[LastWriteTimeUTCTicksKey] = fileInfo.LastWriteTimeUtc.Ticks.ToString();
+
+                        logger.Info("\tUpdating delta blob time...");
+                    }
+
+                    deltaBlobItem.SetMetadata();
+                }
+
+                if (updateArchiveCache)
+                {
+                    if (md5Hash == null)
+                        md5Hash = ComputeHash(fileInfo.FullName);
+
+                    azpb.FileInfo fi = new azpb.FileInfo()
+                    {
+                        Filename = fileInfo.FullName,
+                        LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks,
+                        StorageTier = azpb.FileInfo.Types.StorageTier.Archive,
+                        Md5 = ByteString.CopyFrom(md5Hash)
                     };
 
-                    cacheBlock.DirInfo.FileInfos.Add(azFileInfo);
-                }
-            }
+                    cacheBlock.DirInfo.FileInfos.Add(fi);
 
+                    logger.Info("\tUpdating archive cache...");
+                }
+
+                if (updateDeltaCache)
+                {
+                    if (md5Hash == null)
+                        md5Hash = ComputeHash(fileInfo.FullName);
+
+                    azpb.FileInfo fi = new azpb.FileInfo()
+                    {
+                        Filename = fileInfo.FullName,
+                        LastWriteUTCTicks = fileInfo.LastWriteTimeUtc.Ticks,
+                        StorageTier = azpb.FileInfo.Types.StorageTier.Archive,
+                        Md5 = ByteString.CopyFrom(md5Hash)
+                    };
+
+                    cacheBlock.DirInfo.FileInfos.Add(fi);
+
+                    logger.Info("\tUpdating delta cache...");
+                }
+
+            }
 
             if (job.MetadataCacheFile != null && cacheBlock.DirInfo.FileInfos.Count > 0)
             {
-                Console.WriteLine("Writing {0} files to {1} cache...", cacheBlock.DirInfo.FileInfos.Count, job.MetadataCacheFile);
+                logger.Info("Writing {0} files to {1} cache...", cacheBlock.DirInfo.FileInfos.Count, job.MetadataCacheFile);
                 using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.Append, FileAccess.Write, FileShare.Read))
                 {
                     cacheBlock.WriteDelimitedTo(fs);
+                    fs.Flush();
                 }
             }
 
@@ -436,8 +627,11 @@ namespace Azbackup
 
 
 
-        public void UploadFile(string srcFilenameFullPath, CloudBlobContainer container, string destFilename, bool setArchiveFlag = false)
+        public void UploadFile(string srcFilenameFullPath, CloudBlobContainer container, string destFilename, byte[] md5Hash, bool setArchiveFlag = false)
         {
+            if (md5Hash == null)
+                throw new ArgumentNullException("md5Hash");
+
             System.IO.FileInfo fileInfo = new System.IO.FileInfo(srcFilenameFullPath);
 
             Uri uri = new Uri(container.Uri.AbsoluteUri + '/' + destFilename);
@@ -488,17 +682,17 @@ namespace Azbackup
                             return;
                         }
 
-                        Console.Write("\tSending block {0} of {1}\r", i, totalBlocks);
+                        logger.Info("\tSending block {0} of {1}...", i+1, totalBlocks);
 
                         fs.Seek((long)i * BlockSize, SeekOrigin.Begin);
                         int bytesRead = fs.Read(buffer, 0, (int) BlockSize);
 
-                        byte[] md5Hash = md5.ComputeHash(buffer, 0, bytesRead);
+                        byte[] md5HashSegment = md5.ComputeHash(buffer, 0, bytesRead);
 
                         using (MemoryStream ms = new MemoryStream(buffer, 0, bytesRead))
                         {
                             sw.Restart();
-                            blob.PutBlock(Convert.ToBase64String(BitConverter.GetBytes(i)), ms, Convert.ToBase64String(md5Hash) );
+                            blob.PutBlock(Convert.ToBase64String(BitConverter.GetBytes(i)), ms, Convert.ToBase64String(md5HashSegment) );
                             sw.Stop();
 
                             if (YAMLConfig.Performance?.UploadRate > 0)
@@ -517,8 +711,6 @@ namespace Azbackup
                             }
                         }
                     }
-
-                    Console.WriteLine();
                 }
 
                 List<string> blockNamesList = new List<string>();
@@ -538,20 +730,42 @@ namespace Azbackup
             }
 
             string dateTimeString = fileInfo.LastWriteTimeUtc.ToString("yyyy-MM-dd-HH-mm-ss.fff");
-            blob.Metadata["LastWriteTimeUTC"] = dateTimeString;
-            blob.Metadata["LastWriteTimeUTCTicks"] = fileInfo.LastWriteTimeUtc.Ticks.ToString();
+            blob.Metadata[LastWriteTimeUTCKey] = dateTimeString;
+            blob.Metadata[LastWriteTimeUTCTicksKey] = fileInfo.LastWriteTimeUtc.Ticks.ToString();
+            blob.Metadata[ContentMD5Key] = Convert.ToBase64String(md5Hash);
             blob.SetMetadata();
 
             if (setArchiveFlag)
             {
                 blob.SetStandardBlobTier(StandardBlobTier.Archive);
             }
-
         }
 
 
         public void ExecuteJob(Job job)
         {
+            var config = new NLog.Config.LoggingConfiguration();
+
+            string logDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.Create),
+                "azbackup_logs" );
+
+            string logFileName = Path.Combine(logDir, "azbackup_" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".log");
+
+            var logFile = new NLog.Targets.FileTarget("logfile") { FileName = logFileName };
+            config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logFile);
+            logFile.Layout = new NLog.Layouts.CsvLayout() { Layout = "${longdate},${level:uppercase=true},${message},${exception:format=tostring}" };
+
+            var logConsole = new NLog.Targets.ColoredConsoleTarget("logconsole");
+            logConsole.Layout = new NLog.Layouts.SimpleLayout() { Text = "${longdate}|${level:uppercase=true}|${message}" };
+            config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logConsole);
+
+            NLog.LogManager.Configuration = config;
+
+            logger = NLog.LogManager.GetCurrentClassLogger();
+
+            logger.Info("Starting job {0}...", job.Name);
+
             string authKey;
 
             if (job.AuthKey != null)
@@ -569,7 +783,11 @@ namespace Azbackup
                 authKey = authKeyFile.AuthKey;
             }
             else
+            {
+                logger.Error("No authentication key found.");
                 throw new InvalidOperationException("No authenticiation key found.");
+            }
+                
 
             account = CloudStorageAccount.Parse(GetConnectionString(job.StorageAccount, authKey));
             client = account.CreateCloudBlobClient();
@@ -586,42 +804,57 @@ namespace Azbackup
             
             if (job.MetadataCacheFile != null)
             {
+                logger.Info("Found metadata cache file: {0}", job.MetadataCacheFile);
+
                 // open the metadata file
-                using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.OpenOrCreate, FileAccess.Read, FileShare.Read))
+                using (FileStream fs = new FileStream(job.MetadataCacheFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read))
                 {
+                    int counter = 0;
+
+                    long lastGoodPos = 0;
+
                     try
                     {
                         while (true)
                         {
                             CacheBlock cacheBlock = CacheBlock.Parser.ParseDelimitedFrom(fs);
 
+                            lastGoodPos = fs.Position;
+
                             foreach (var fileInfo in cacheBlock.DirInfo.FileInfos)
                             {
+                                counter++;
+
                                 string path = Path.Combine(cacheBlock.DirInfo.Directory, fileInfo.Filename);
 
                                 switch (fileInfo.StorageTier)
                                 {
                                 case azpb.FileInfo.Types.StorageTier.Archive:
-                                    archiveFileData[path] = fileInfo.LastWriteUTCTicks;
+                                    archiveFileData[path] = fileInfo;
                                     break;
 
                                 case azpb.FileInfo.Types.StorageTier.Delta:
-                                    deltaFileData[path] = fileInfo.LastWriteUTCTicks;
+                                    deltaFileData[path] = fileInfo;
                                     break;
                                 }
                             }
                         }
                     }
-                    catch (InvalidProtocolBufferException)
+                    catch (InvalidProtocolBufferException ipbe)
                     {
                         // we're done, so bail out
+                        logger.Warn(ipbe, "Unable to parse protobuf.");
+                        fs.SetLength(lastGoodPos);
                     }
+
+                    logger.Info("Processed {0} files in metadata cache file.", counter);
                 }
             }
             
 
             foreach (var dirJob in job.Directories)
             {
+
                 DirectoryInfo di = new DirectoryInfo(dirJob.Source);
 
                 string destDir = dirJob.Destination.Replace('\\', '/');
@@ -631,7 +864,10 @@ namespace Azbackup
                 UploadDirectory(job, di.FullName, di.FullName, destDir);
 
                 if (stopFlag.WaitOne(0) || !YAMLConfig.Performance.IsActive)
+                {
                     return;
+                }
+                    
             }
         }
 

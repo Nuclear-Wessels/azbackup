@@ -16,6 +16,8 @@ message FileInfo
     }
 
     StorageTier storageTier = 3;
+
+    bytes md5 = 4;
 }
 
 
