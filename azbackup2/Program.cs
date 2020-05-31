@@ -6,9 +6,11 @@ using NLog.Config;
 using NLog.Targets;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Threading;
 
 namespace NuclearWessels
 {
@@ -23,37 +25,55 @@ namespace NuclearWessels
 
         [Option]
         public string LogFile { get; set; }
+
+        [Option]
+        public int Duration { get; set; }
+
+    }
+
+    public class BackupRestoreCommonOptions : CommonOptions
+    {
+        [Option("pc", Required = true, HelpText = "Primary container name")]
+        public string PrimaryContainer { get; set; }
+
+        [Option("dc", HelpText = "Delta container name")]
+        public string DeltaContainer { get; set; }
+
+        [Option("hc", HelpText = "History container name")]
+        public string HistoryContainer { get; set; }
     }
 
 
-
     [Verb("backup")]
-    public class BackupOptions : CommonOptions
+    public class BackupOptions : BackupRestoreCommonOptions
     {
         [Option('d', "dir", Required = true, HelpText = "Local directory to be backed up.")]
         public string BackupDirectory { get; set; }
 
-        [Option(Required = true)]
-        public string PrimaryContainer { get; set; }
-
-        [Option]
+        [Option("pt", HelpText = "Storage tier for primary container.")]
         public StandardBlobTier? PrimaryTier { get; set; }
 
+        [Option("dt", HelpText = "Storage tier for delta container")]
+        public StandardBlobTier? DeltaTier { get; set; }
 
-        public string DeltaContainer { get; set; }
-        public StandardBlobTier? DeltaContainerTier { get; set; } = StandardBlobTier.Cool;
+        [Option("ht", HelpText = "Storage tier for history container")]
+        public StandardBlobTier? HistoryTier { get; set; }
 
-        public string HistoryContainer { get; set; }
-        public StandardBlobTier? HistoryContainerTier { get; set; } = StandardBlobTier.Cool;
+        [Option(HelpText = "Upload bandwidth (kbits/second)")]
+        public int? Bandwidth { get; set; }
 
     }
 
 
     [Verb("restore")]
-    public class RestoreOptions : CommonOptions
+    public class RestoreOptions : BackupRestoreCommonOptions
     {
+        [Option('d', "dir", Required = true, HelpText = "Directory to restore files")]
+        public string RestoreDirectory { get; set; }
 
+        public bool Rehydrate { get; set; }
     }
+
 
     [Verb("set-tier")]
     public class SetTierOptions : CommonOptions
@@ -70,6 +90,11 @@ namespace NuclearWessels
         public Backup(BackupOptions options)
         {
             BackupOptions = options;
+
+            if (options.LogFile != null)
+            {
+                var logFile = new NLog.Targets.FileTarget("logfile") { FileName = options.LogFile };
+            }
         }
 
         private DirectoryInfo baseDir;
@@ -150,19 +175,7 @@ namespace NuclearWessels
                 if (!primaryBlob.Exists())
                 {
                     // the blob doesn't exist, so upload it to primary
-                    bool done = false;
-                    while (!done)
-                    {
-                        try
-                        {
-                            UploadFile(primaryContainer, file, blobName, BackupOptions.PrimaryTier);
-                            done = true;
-                        }
-                        catch (Exception e)
-                        {
-                            log.Info("Encountered an error while uploading {0}.  Retrying.  Exception: {1}", blobName, e);
-                        }
-                    }
+                    UploadFile(primaryContainer, file, blobName, BackupOptions.PrimaryTier);
                 }
                 else
                 {
@@ -189,40 +202,98 @@ namespace NuclearWessels
                                 if (!deltaBlob.Exists())
                                 {
                                     // There's no file in the delta container, so we'll upload it
-                                    UploadFile(deltaContainer, file, blobName, BackupOptions.DeltaContainerTier);
+                                    log.Info("Uploading {0}/{1}...", blobName, BackupOptions.DeltaContainer);
+                                    UploadFile(deltaContainer, file, blobName, BackupOptions.DeltaTier);
+                                }
+                                else if (AreFilesDifferent(deltaBlob, file))
+                                {
+                                    // We've checked the delta container for a difference, and there is one.
+                                    // So now check to see if there's a history container.
+
+                                    if (historyContainer != null)
+                                    {
+                                        // store the original file in the history container
+                                        DateTime lastWriteTime = GetLastWriteTimeUTC(deltaBlob);
+
+                                        string historyBlobName = blobName + "." + lastWriteTime.ToString("yyyyMMdd-HHmmss");
+
+                                        CloudBlockBlob historyBlob = historyContainer.GetBlockBlobReference(historyBlobName);
+
+                                        log.Info("Copying {0}/{1} to {2}/{3}...",
+                                            BackupOptions.DeltaContainer, blobName,
+                                            BackupOptions.HistoryContainer, historyBlobName);
+                                        CopyFile(deltaBlob, historyBlob);
+                                    }
+
+                                    // update the delta blob
+                                    log.Info("Uploading {0}/{1}...", BackupOptions.DeltaContainer, blobName);
+                                    UploadFile(deltaContainer, file, blobName, BackupOptions.DeltaTier);
                                 }
                                 else
                                 {
-                                    // There is a file in the delta blob, so compare those two instead
-                                    if (AreFilesDifferent(deltaBlob, file))
-                                    {
-
-                                    }
-                                }
+                                    log.Info("Skipping {0}.  No change.", file.Name);
+                                }                                
                             }
                             break;
 
                         case StandardBlobTier.Hot:
                         case StandardBlobTier.Cool:
-                            // 
-
-                            if (historyContainer != null)
+                            if (deltaContainer != null)
                             {
-                                // first copy the existing file to the history container.
-                                DateTime lastModifiedTime = DateTime.Parse(primaryBlob.Metadata[LastWriteMetadataKeyName]);
+                                CloudBlockBlob deltaBlob = deltaContainer.GetBlockBlobReference(blobName);
 
-                                string historyBlobName = blobName + "." + lastModifiedTime.ToString("YYYYMMdd-HHmmss");
-                                CloudBlockBlob historyBlob = historyContainer.GetBlockBlobReference(historyBlobName);
-                                CopyFile(primaryBlob, historyBlob);
-                                log.Info("Copy file {0} to history container: {1}", blobName, historyContainer.Name);
+                                if (!deltaBlob.Exists())
+                                {
+                                    log.Info("Uploading {0}/{1}...", BackupOptions.DeltaContainer, blobName);
+                                    UploadFile(deltaContainer, file, blobName, BackupOptions.DeltaTier);
+                                }
+                                else if (AreFilesDifferent(deltaBlob, file))
+                                {
+                                    // The files are different, so check to see if we need to copy the original file to 
+                                    // the history container.
+
+                                    if (historyContainer != null)
+                                    {
+                                        // store the original file in the history container
+                                        DateTime lastWriteTime = GetLastWriteTimeUTC(deltaBlob);
+
+                                        string historyBlobName = blobName + "." + lastWriteTime.ToString("yyyyMMdd-HHmmss");
+
+                                        CloudBlockBlob historyBlob = historyContainer.GetBlockBlobReference(historyBlobName);
+
+                                        log.Info("Copying {0}/{1} to {2}/{3}...",
+                                            BackupOptions.DeltaContainer, blobName, 
+                                            BackupOptions.HistoryContainer, historyBlobName);
+                                        CopyFile(deltaBlob, historyBlob);
+                                    }
+
+                                    // update the delta blob
+                                    log.Info("Uploading {0}/{1}...", BackupOptions.DeltaContainer, blobName);
+                                    UploadFile(deltaContainer, file, blobName, BackupOptions.DeltaTier);
+                                }
+                                else
+                                {
+                                    log.Info("Skipping {0}.  No change.", file.Name);
+                                }
                             }
-
-                            if (deltaContainer == null)
+                            else
                             {
-                                
-                            }
+                                // No delta container, so check to see if we want to store original files in the history 
+                                // container
+                                if (historyContainer != null)
+                                {
+                                    // first copy the existing file to the history container.
+                                    DateTime lastModifiedTime = GetLastWriteTimeUTC(primaryBlob);
 
-                            
+                                    string historyBlobName = blobName + "." + lastModifiedTime.ToString("yyyyMMdd-HHmmss");
+                                    CloudBlockBlob historyBlob = historyContainer.GetBlockBlobReference(historyBlobName);
+                                    log.Info("Copy file {0} to history container: {1}", blobName, historyContainer.Name);
+                                    CopyFile(primaryBlob, historyBlob);
+                                }
+
+                                log.Info("Upload to {0}/{1}...", BackupOptions.PrimaryContainer, blobName);
+                                UploadFile(primaryContainer, file, blobName, BackupOptions.PrimaryTier);
+                            }
                             break;
                         }
 
@@ -248,6 +319,11 @@ namespace NuclearWessels
         public void CopyFile(CloudBlockBlob sourceBlob, CloudBlockBlob destBlob)
         {
             string leaseId = destBlob.StartCopy(sourceBlob);
+
+            if (BackupOptions.DryRun)
+            {
+                return;
+            }
 
             bool done = false;
 
@@ -279,6 +355,12 @@ namespace NuclearWessels
         protected bool AreFilesDifferent(CloudBlockBlob blob, FileInfo fileInfo)
         {
             var blobMetadata = blob.Metadata;
+
+            if (!blobMetadata.ContainsKey(LastWriteMetadataKeyName))
+            {
+                return true;
+            }
+
             DateTime lastWriteUtc = DateTime.Parse(blob.Metadata[LastWriteMetadataKeyName]);
 
             long millisecondsDiff = (long)lastWriteUtc.Subtract(fileInfo.LastWriteTimeUtc).TotalMilliseconds;
@@ -294,26 +376,57 @@ namespace NuclearWessels
         }
 
 
+        protected static DateTime GetLastWriteTimeUTC(CloudBlockBlob blob)
+        {
+            var blobMetadata = blob.Metadata;
+            DateTime lastWriteUtc = DateTime.Parse(blob.Metadata[LastWriteMetadataKeyName]);
+
+            return lastWriteUtc;
+        }
+
+
 
         public void UploadFile(CloudBlobContainer container, FileInfo fileInfo, string blobName, StandardBlobTier? tier)
         {
-            log.Info("Uploading file {0} to {1} ({2})", fileInfo.Name, blobName, tier.ToString());
+            if (tier.HasValue)
+            {
+                log.Info("Uploading file {0}/{1} ({2})", container.Name, blobName, tier.ToString());
+            }
+            else
+            {
+                log.Info("Uploading file {0}/{1}", container.Name, blobName);
+            }
+
+            if (BackupOptions.DryRun)
+            {
+                return;
+            }
 
             const long FourMegabytes = 4 * 1024 * 1024;
 
             CloudBlockBlob blob = container.GetBlockBlobReference(blobName);
 
+            Stopwatch sw = new Stopwatch();
+
+
             if (fileInfo.Length <= FourMegabytes)
             {
                 // just upload the file
+                sw.Restart();
                 blob.UploadFromFile(fileInfo.FullName);
+                sw.Stop();
+
+                if (BackupOptions.Bandwidth.HasValue)
+                {
+                    WaitBackup((int)fileInfo.Length, sw.Elapsed.TotalSeconds);
+                }
             }
             else
             {
                 // upload the file in parts
 
                 // first check to see if there are parts already there
-                IEnumerable<ListBlockItem> writtenBlockList = null;
+                IEnumerable<ListBlockItem> writtenBlockList;
 
                 try
                 {
@@ -347,6 +460,7 @@ namespace NuclearWessels
 
                 long maxBlock = blocksToBeWritten.Max();
 
+
                 using (FileStream fs = File.Open(fileInfo.FullName, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
                     foreach (long block in blocksToBeWritten)
@@ -372,9 +486,17 @@ namespace NuclearWessels
                             md5Hash = Convert.ToBase64String(md5HashBytes);
                         }
 
+                        
                         using (MemoryStream ms = new MemoryStream(buffer, 0, bytesToRead, false))
                         {
+                            sw.Restart();
                             blob.PutBlock(blockId, ms, md5Hash);
+                            sw.Stop();
+                        }
+
+                        if (BackupOptions.Bandwidth.HasValue)
+                        {
+                            WaitBackup(bytesToRead, sw.Elapsed.TotalSeconds);
                         }
                     }
                 }
@@ -394,14 +516,35 @@ namespace NuclearWessels
 
             blob.FetchAttributes();
 
-            // TODO Set tier
+            if (tier.HasValue)
+            {
+                blob.SetStandardBlobTier(tier.Value);
+            }
 
             log.Info("Finished uploading {0}", blobName);
         }
 
 
+        protected void WaitBackup(int numBytes, double actualSeconds)
+        {
+            // calculate the time it was supposed to take according to the bandwidth
+            double rateBytesPerSecond = (double)BackupOptions.Bandwidth.Value * 1000.0 / 8.0;
+
+            double secondsAtBandwidth = (double)numBytes / rateBytesPerSecond;
+
+            if (actualSeconds < secondsAtBandwidth)
+            {
+                double diff = secondsAtBandwidth - actualSeconds;
+                Thread.Sleep((int)(diff * 1000.0));
+            }
+        }
     }
 
+
+    public class Restore
+    {
+
+    }
 
 
     class AzBackup2
